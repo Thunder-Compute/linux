@@ -686,8 +686,20 @@ static void pvm_set_host_cr3_for_guest(struct vcpu_pvm *pvm)
 			switch_hw_cr3 |= (pcid ^ PVM_GUEST_PTI_PCID_MASK) | CR3_NOFLUSH;
 
 		enter_cr3 |= pcid;
-		if (!pvm->flush_hwtlb_current)
+		if (pvm->flush_hwtlb_current) {
+			/*
+			 * One guest PCID maps to two host PCIDs, one per root.
+			 * A flush of the current guest PCID must also drop the
+			 * other root's translations: direct switches to that
+			 * root load it with CR3_NOFLUSH.
+			 */
+			if (static_cpu_has(X86_FEATURE_INVPCID))
+				invpcid_flush_single_context(pcid ^ PVM_GUEST_PTI_PCID_MASK);
+			else
+				__pvm_hwtlb_flush_all();
+		} else {
 			enter_cr3 |= CR3_NOFLUSH;
+		}
 		pvm->flush_hwtlb_current = false;
 
 		/*
@@ -1740,6 +1752,22 @@ static int handle_hc_irq_halt(struct kvm_vcpu *vcpu)
 }
 
 /*
+ * The guest flushed the address space it runs in.  kvm_set_cr3() syncs only
+ * the current root, but the other mode's root of the same CR3 sits in
+ * prev_roots and direct switches enter it without a VM exit.  Its unsync
+ * shadow pages may still map what the guest just changed, e.g. PTEs that
+ * fork() write-protected would stay writable for user mode, letting the parent
+ * write into pages it now shares with its child.  Sync the previous roots, as
+ * kvm_vcpu_flush_tlb_guest() does for shadow paging, without dropping the TLB
+ * entries of other address spaces.
+ */
+static void pvm_flush_current_address_space(struct kvm_vcpu *vcpu, unsigned long cr3)
+{
+	kvm_set_cr3(vcpu, cr3);
+	kvm_mmu_sync_prev_roots(vcpu);
+}
+
+/*
  * Hypercall: PVM_HC_LOAD_PGTBL
  *	Load two PGDs into the current CR3.
  *
@@ -1765,7 +1793,7 @@ static int handle_hc_load_pagetables(struct kvm_vcpu *vcpu, unsigned long flags,
 	}
 
 	if (flags & PVM_LOAD_PGTBL_FLAGS_TLB)
-		kvm_set_cr3(vcpu, pgd);
+		pvm_flush_current_address_space(vcpu, pgd);
 	else
 		kvm_set_cr3(vcpu, pgd | CR3_NOFLUSH);
 
@@ -1789,7 +1817,7 @@ static int handle_hc_flush_tlb_all(struct kvm_vcpu *vcpu)
  */
 static int handle_hc_flush_tlb_current(struct kvm_vcpu *vcpu)
 {
-	kvm_set_cr3(vcpu, vcpu->arch.cr3);
+	pvm_flush_current_address_space(vcpu, vcpu->arch.cr3);
 	return 1;
 }
 

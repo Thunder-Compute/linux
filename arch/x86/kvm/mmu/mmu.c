@@ -4182,6 +4182,7 @@ void kvm_mmu_sync_prev_roots(struct kvm_vcpu *vcpu)
 	/* sync prev_roots by simply freeing them */
 	kvm_mmu_free_roots(vcpu->kvm, vcpu->arch.mmu, roots_to_free);
 }
+EXPORT_SYMBOL_GPL(kvm_mmu_sync_prev_roots);
 
 static gpa_t nonpaging_gva_to_gpa(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 				  gpa_t vaddr, u64 access,
